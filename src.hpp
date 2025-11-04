@@ -6,36 +6,34 @@ void Calculate(std::vector<Matrix *> keys, std::vector<Matrix *> values,
                Rater &rater, GpuSimulator &gpu_sim,
                MatrixMemoryAllocator matrix_memory_allocator) {
   assert(keys.size() == values.size());
+
+  // Cache K_all and V_all across iterations to avoid redundant concatenations
+  Matrix* K_all_cache = nullptr;
+  Matrix* V_all_cache = nullptr;
+
   for (size_t i = 0; i < keys.size(); ++i) {
     auto current_query = rater.GetNextQuery();
-    /*
-     * Implement your calculation logic here.
-     * You can use the GpuSimulator instance to perform matrix operations.
-     * For example:
-     * gpu_sim.MoveMatrixToGpuHbm(keys[i]);
-     * When your need a new matrix, to avoid memory leak, you should use
-     * Matrix* new_matrix =
-     * matrix_memory_allocator.Allocate(YOUR_MATRIX_NAME(string, which is
-     * helpful for debugging)); It can manage the memory of matrices
-     * automatically.
-     */
 
     // Move current_query to SRAM for computation
     gpu_sim.MoveMatrixToSharedMem(current_query);
 
-    // Build K_all by concatenating keys in HBM first (to avoid modifying originals)
+    // Build K_all incrementally from cache
     Matrix* K_all = nullptr;
-    for (size_t j = 0; j <= i; ++j) {
-      if (j == 0) {
-        K_all = matrix_memory_allocator.Allocate("K_all");
-        gpu_sim.Copy(keys[j], K_all, kInGpuHbm);
-      } else {
-        Matrix* temp = matrix_memory_allocator.Allocate("temp_K");
-        gpu_sim.Concat(K_all, keys[j], temp, 0, kInGpuHbm);
-        gpu_sim.ReleaseMatrix(K_all);
-        K_all = temp;
-      }
+    if (i == 0) {
+      K_all = matrix_memory_allocator.Allocate("K_all");
+      gpu_sim.Copy(keys[0], K_all, kInGpuHbm);
+    } else {
+      // Extend previous K_all with new key
+      K_all = matrix_memory_allocator.Allocate("K_all");
+      gpu_sim.Concat(K_all_cache, keys[i], K_all, 0, kInGpuHbm);
     }
+
+    // Update cache for next iteration (but don't release yet)
+    if (K_all_cache != nullptr) {
+      gpu_sim.ReleaseMatrix(K_all_cache);
+    }
+    K_all_cache = matrix_memory_allocator.Allocate("K_cache");
+    gpu_sim.Copy(K_all, K_all_cache, kInGpuHbm);
 
     // Move K_all to SRAM for faster operations
     gpu_sim.MoveMatrixToSharedMem(K_all);
@@ -79,19 +77,22 @@ void Calculate(std::vector<Matrix *> keys, std::vector<Matrix *> values,
     }
     gpu_sim.ReleaseMatrix(exp_QK);
 
-    // Build V_all by concatenating values in HBM first
+    // Build V_all incrementally from cache
     Matrix* V_all = nullptr;
-    for (size_t j = 0; j <= i; ++j) {
-      if (j == 0) {
-        V_all = matrix_memory_allocator.Allocate("V_all");
-        gpu_sim.Copy(values[j], V_all, kInGpuHbm);
-      } else {
-        Matrix* temp = matrix_memory_allocator.Allocate("temp_V");
-        gpu_sim.Concat(V_all, values[j], temp, 0, kInGpuHbm);
-        gpu_sim.ReleaseMatrix(V_all);
-        V_all = temp;
-      }
+    if (i == 0) {
+      V_all = matrix_memory_allocator.Allocate("V_all");
+      gpu_sim.Copy(values[0], V_all, kInGpuHbm);
+    } else {
+      V_all = matrix_memory_allocator.Allocate("V_all");
+      gpu_sim.Concat(V_all_cache, values[i], V_all, 0, kInGpuHbm);
     }
+
+    // Update cache for next iteration
+    if (V_all_cache != nullptr) {
+      gpu_sim.ReleaseMatrix(V_all_cache);
+    }
+    V_all_cache = matrix_memory_allocator.Allocate("V_cache");
+    gpu_sim.Copy(V_all, V_all_cache, kInGpuHbm);
 
     // Move V_all to SRAM
     gpu_sim.MoveMatrixToSharedMem(V_all);
