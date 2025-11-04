@@ -23,31 +23,26 @@ void Calculate(std::vector<Matrix *> keys, std::vector<Matrix *> values,
     // In round i (loop index, 0-based), we use keys[0..i] and values[0..i]
     // Q has shape [i+1, d], each K and V has shape [1, d]
     // Attention formula: Softmax(Q @ K_all^T) @ V_all
-    // where K_all is concatenation of K[0..i] with shape [i+1, d]
-    // Q @ K_all^T = [i+1, d] @ [d, i+1] = [i+1, i+1]
-    // After softmax: [i+1, i+1]
-    // Result: [i+1, i+1] @ [i+1, d] = [i+1, d]
 
     // Move current_query to SRAM
     gpu_sim.MoveMatrixToSharedMem(current_query);
 
-    // Concatenate all keys[0..i] into K_all
+    // Concatenate all keys[0..i] into K_all in HBM first
     Matrix* K_all = nullptr;
     for (size_t j = 0; j <= i; ++j) {
-      gpu_sim.MoveMatrixToSharedMem(keys[j]);
       if (j == 0) {
         K_all = matrix_memory_allocator.Allocate("K_all");
-        gpu_sim.Copy(keys[j], K_all, kInSharedMemory);
+        gpu_sim.Copy(keys[j], K_all, kInGpuHbm);
       } else {
         Matrix* temp_concat = matrix_memory_allocator.Allocate("temp_K");
-        gpu_sim.Concat(K_all, keys[j], temp_concat, 0, kInSharedMemory);
+        gpu_sim.Concat(K_all, keys[j], temp_concat, 0, kInGpuHbm);
         gpu_sim.ReleaseMatrix(K_all);
         K_all = temp_concat;
       }
-      gpu_sim.MoveMatrixToGpuHbm(keys[j]);
     }
 
-    // Transpose K_all: [i+1, d] -> [d, i+1]
+    // Move K_all to SRAM and transpose: [i+1, d] -> [d, i+1]
+    gpu_sim.MoveMatrixToSharedMem(K_all);
     gpu_sim.Transpose(K_all, kInSharedMemory);
 
     // Compute Q @ K_all^T: [i+1, d] @ [d, i+1] = [i+1, i+1]
@@ -56,8 +51,6 @@ void Calculate(std::vector<Matrix *> keys, std::vector<Matrix *> values,
     gpu_sim.ReleaseMatrix(K_all);
 
     // Apply Softmax row-wise on QK
-    // For each row: softmax(row) = exp(row) / sum(exp(row))
-
     // Compute exp(QK)
     Matrix* exp_QK = matrix_memory_allocator.Allocate("exp_QK");
     gpu_sim.MatExp(QK, exp_QK);
@@ -65,23 +58,18 @@ void Calculate(std::vector<Matrix *> keys, std::vector<Matrix *> values,
 
     // Build softmax matrix by processing each row
     Matrix* softmax_QK = nullptr;
-
     for (size_t row_idx = 0; row_idx <= i; ++row_idx) {
-      // Get the row
-      Matrix* row = matrix_memory_allocator.Allocate("row_" + std::to_string(row_idx));
+      Matrix* row = matrix_memory_allocator.Allocate("row");
       gpu_sim.GetRow(exp_QK, row_idx, row, kInSharedMemory);
 
-      // Compute sum of the row
-      Matrix* row_sum = matrix_memory_allocator.Allocate("row_sum_" + std::to_string(row_idx));
+      Matrix* row_sum = matrix_memory_allocator.Allocate("row_sum");
       gpu_sim.Sum(row, row_sum);
 
-      // Divide row by sum
-      Matrix* softmax_row = matrix_memory_allocator.Allocate("softmax_row_" + std::to_string(row_idx));
+      Matrix* softmax_row = matrix_memory_allocator.Allocate("softmax_row");
       gpu_sim.MatDiv(row, row_sum, softmax_row);
       gpu_sim.ReleaseMatrix(row);
       gpu_sim.ReleaseMatrix(row_sum);
 
-      // Concatenate to result
       if (row_idx == 0) {
         softmax_QK = softmax_row;
       } else {
@@ -94,21 +82,22 @@ void Calculate(std::vector<Matrix *> keys, std::vector<Matrix *> values,
     }
     gpu_sim.ReleaseMatrix(exp_QK);
 
-    // Concatenate all values[0..i] into V_all
+    // Concatenate all values[0..i] into V_all in HBM
     Matrix* V_all = nullptr;
     for (size_t j = 0; j <= i; ++j) {
-      gpu_sim.MoveMatrixToSharedMem(values[j]);
       if (j == 0) {
         V_all = matrix_memory_allocator.Allocate("V_all");
-        gpu_sim.Copy(values[j], V_all, kInSharedMemory);
+        gpu_sim.Copy(values[j], V_all, kInGpuHbm);
       } else {
         Matrix* temp_concat = matrix_memory_allocator.Allocate("temp_V");
-        gpu_sim.Concat(V_all, values[j], temp_concat, 0, kInSharedMemory);
+        gpu_sim.Concat(V_all, values[j], temp_concat, 0, kInGpuHbm);
         gpu_sim.ReleaseMatrix(V_all);
         V_all = temp_concat;
       }
-      gpu_sim.MoveMatrixToGpuHbm(values[j]);
     }
+
+    // Move V_all to SRAM
+    gpu_sim.MoveMatrixToSharedMem(V_all);
 
     // Compute final result: softmax_QK @ V_all = [i+1, i+1] @ [i+1, d] = [i+1, d]
     Matrix* result = matrix_memory_allocator.Allocate("result");
