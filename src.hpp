@@ -63,38 +63,34 @@ void Calculate(std::vector<Matrix *> keys, std::vector<Matrix *> values,
     gpu_sim.MatExp(QK, exp_QK);
     gpu_sim.ReleaseMatrix(QK);
 
-    // For each row, compute the sum and divide
-    // We need to process each row separately
-    Matrix* softmax_QK = matrix_memory_allocator.Allocate("softmax_QK");
+    // Build softmax matrix by processing each row
+    Matrix* softmax_QK = nullptr;
 
-    // For the first row, initialize softmax_QK
-    Matrix* row_0 = matrix_memory_allocator.Allocate("row_0");
-    gpu_sim.GetRow(exp_QK, 0, row_0, kInSharedMemory);
-    Matrix* row_sum_0 = matrix_memory_allocator.Allocate("row_sum_0");
-    gpu_sim.Sum(row_0, row_sum_0);
-    Matrix* softmax_row_0 = matrix_memory_allocator.Allocate("softmax_row_0");
-    gpu_sim.MatDiv(row_0, row_sum_0, softmax_row_0);
-    gpu_sim.ReleaseMatrix(row_0);
-    gpu_sim.ReleaseMatrix(row_sum_0);
-    gpu_sim.Copy(softmax_row_0, softmax_QK, kInSharedMemory);
-    gpu_sim.ReleaseMatrix(softmax_row_0);
-
-    // Process remaining rows and concatenate
-    for (size_t row_idx = 1; row_idx <= i; ++row_idx) {
+    for (size_t row_idx = 0; row_idx <= i; ++row_idx) {
+      // Get the row
       Matrix* row = matrix_memory_allocator.Allocate("row_" + std::to_string(row_idx));
       gpu_sim.GetRow(exp_QK, row_idx, row, kInSharedMemory);
+
+      // Compute sum of the row
       Matrix* row_sum = matrix_memory_allocator.Allocate("row_sum_" + std::to_string(row_idx));
       gpu_sim.Sum(row, row_sum);
+
+      // Divide row by sum
       Matrix* softmax_row = matrix_memory_allocator.Allocate("softmax_row_" + std::to_string(row_idx));
       gpu_sim.MatDiv(row, row_sum, softmax_row);
       gpu_sim.ReleaseMatrix(row);
       gpu_sim.ReleaseMatrix(row_sum);
 
-      Matrix* temp_concat = matrix_memory_allocator.Allocate("temp_softmax");
-      gpu_sim.Concat(softmax_QK, softmax_row, temp_concat, 0, kInSharedMemory);
-      gpu_sim.ReleaseMatrix(softmax_QK);
-      gpu_sim.ReleaseMatrix(softmax_row);
-      softmax_QK = temp_concat;
+      // Concatenate to result
+      if (row_idx == 0) {
+        softmax_QK = softmax_row;
+      } else {
+        Matrix* temp_concat = matrix_memory_allocator.Allocate("temp_softmax");
+        gpu_sim.Concat(softmax_QK, softmax_row, temp_concat, 0, kInSharedMemory);
+        gpu_sim.ReleaseMatrix(softmax_QK);
+        gpu_sim.ReleaseMatrix(softmax_row);
+        softmax_QK = temp_concat;
+      }
     }
     gpu_sim.ReleaseMatrix(exp_QK);
 
