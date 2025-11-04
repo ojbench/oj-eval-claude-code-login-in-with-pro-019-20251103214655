@@ -23,21 +23,22 @@ void Calculate(std::vector<Matrix *> keys, std::vector<Matrix *> values,
     // Move current_query to SRAM for computation
     gpu_sim.MoveMatrixToSharedMem(current_query);
 
-    // Build K_all by concatenating keys in SRAM (faster)
+    // Build K_all by concatenating keys in HBM first (to avoid modifying originals)
     Matrix* K_all = nullptr;
     for (size_t j = 0; j <= i; ++j) {
-      gpu_sim.MoveMatrixToSharedMem(keys[j]);
       if (j == 0) {
         K_all = matrix_memory_allocator.Allocate("K_all");
-        gpu_sim.Copy(keys[j], K_all, kInSharedMemory);
+        gpu_sim.Copy(keys[j], K_all, kInGpuHbm);
       } else {
         Matrix* temp = matrix_memory_allocator.Allocate("temp_K");
-        gpu_sim.Concat(K_all, keys[j], temp, 0, kInSharedMemory);
+        gpu_sim.Concat(K_all, keys[j], temp, 0, kInGpuHbm);
         gpu_sim.ReleaseMatrix(K_all);
         K_all = temp;
       }
-      gpu_sim.MoveMatrixToGpuHbm(keys[j]);
     }
+
+    // Move K_all to SRAM for faster operations
+    gpu_sim.MoveMatrixToSharedMem(K_all);
 
     // Transpose K_all in SRAM
     gpu_sim.Transpose(K_all, kInSharedMemory);
@@ -78,21 +79,22 @@ void Calculate(std::vector<Matrix *> keys, std::vector<Matrix *> values,
     }
     gpu_sim.ReleaseMatrix(exp_QK);
 
-    // Build V_all by concatenating values in SRAM
+    // Build V_all by concatenating values in HBM first
     Matrix* V_all = nullptr;
     for (size_t j = 0; j <= i; ++j) {
-      gpu_sim.MoveMatrixToSharedMem(values[j]);
       if (j == 0) {
         V_all = matrix_memory_allocator.Allocate("V_all");
-        gpu_sim.Copy(values[j], V_all, kInSharedMemory);
+        gpu_sim.Copy(values[j], V_all, kInGpuHbm);
       } else {
         Matrix* temp = matrix_memory_allocator.Allocate("temp_V");
-        gpu_sim.Concat(V_all, values[j], temp, 0, kInSharedMemory);
+        gpu_sim.Concat(V_all, values[j], temp, 0, kInGpuHbm);
         gpu_sim.ReleaseMatrix(V_all);
         V_all = temp;
       }
-      gpu_sim.MoveMatrixToGpuHbm(values[j]);
     }
+
+    // Move V_all to SRAM
+    gpu_sim.MoveMatrixToSharedMem(V_all);
 
     // Compute attention output
     Matrix* result = matrix_memory_allocator.Allocate("result");
