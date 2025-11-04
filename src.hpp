@@ -20,95 +20,88 @@ void Calculate(std::vector<Matrix *> keys, std::vector<Matrix *> values,
      * automatically.
      */
 
-    // In round i (loop index, 0-based), we use keys[0..i] and values[0..i]
-    // Q has shape [i+1, d], each K and V has shape [1, d]
-    // Attention formula: Softmax(Q @ K_all^T) @ V_all
-
-    // Move current_query to SRAM
+    // Move current_query to SRAM for computation
     gpu_sim.MoveMatrixToSharedMem(current_query);
 
-    // Concatenate all keys[0..i] into K_all in HBM first
+    // Build K_all by concatenating keys in SRAM (faster)
     Matrix* K_all = nullptr;
     for (size_t j = 0; j <= i; ++j) {
+      gpu_sim.MoveMatrixToSharedMem(keys[j]);
       if (j == 0) {
         K_all = matrix_memory_allocator.Allocate("K_all");
-        gpu_sim.Copy(keys[j], K_all, kInGpuHbm);
+        gpu_sim.Copy(keys[j], K_all, kInSharedMemory);
       } else {
-        Matrix* temp_concat = matrix_memory_allocator.Allocate("temp_K");
-        gpu_sim.Concat(K_all, keys[j], temp_concat, 0, kInGpuHbm);
+        Matrix* temp = matrix_memory_allocator.Allocate("temp_K");
+        gpu_sim.Concat(K_all, keys[j], temp, 0, kInSharedMemory);
         gpu_sim.ReleaseMatrix(K_all);
-        K_all = temp_concat;
+        K_all = temp;
       }
+      gpu_sim.MoveMatrixToGpuHbm(keys[j]);
     }
 
-    // Move K_all to SRAM and transpose: [i+1, d] -> [d, i+1]
-    gpu_sim.MoveMatrixToSharedMem(K_all);
+    // Transpose K_all in SRAM
     gpu_sim.Transpose(K_all, kInSharedMemory);
 
-    // Compute Q @ K_all^T: [i+1, d] @ [d, i+1] = [i+1, i+1]
+    // Compute Q @ K^T
     Matrix* QK = matrix_memory_allocator.Allocate("QK");
     gpu_sim.MatMul(current_query, K_all, QK);
     gpu_sim.ReleaseMatrix(K_all);
 
-    // Apply Softmax row-wise on QK
     // Compute exp(QK)
     Matrix* exp_QK = matrix_memory_allocator.Allocate("exp_QK");
     gpu_sim.MatExp(QK, exp_QK);
     gpu_sim.ReleaseMatrix(QK);
 
-    // Build softmax matrix by processing each row
+    // Apply row-wise softmax
     Matrix* softmax_QK = nullptr;
-    for (size_t row_idx = 0; row_idx <= i; ++row_idx) {
+    for (size_t r = 0; r <= i; ++r) {
       Matrix* row = matrix_memory_allocator.Allocate("row");
-      gpu_sim.GetRow(exp_QK, row_idx, row, kInSharedMemory);
+      gpu_sim.GetRow(exp_QK, r, row, kInSharedMemory);
 
-      Matrix* row_sum = matrix_memory_allocator.Allocate("row_sum");
-      gpu_sim.Sum(row, row_sum);
+      Matrix* sum = matrix_memory_allocator.Allocate("sum");
+      gpu_sim.Sum(row, sum);
 
-      Matrix* softmax_row = matrix_memory_allocator.Allocate("softmax_row");
-      gpu_sim.MatDiv(row, row_sum, softmax_row);
+      Matrix* norm_row = matrix_memory_allocator.Allocate("norm");
+      gpu_sim.MatDiv(row, sum, norm_row);
       gpu_sim.ReleaseMatrix(row);
-      gpu_sim.ReleaseMatrix(row_sum);
+      gpu_sim.ReleaseMatrix(sum);
 
-      if (row_idx == 0) {
-        softmax_QK = softmax_row;
+      if (r == 0) {
+        softmax_QK = norm_row;
       } else {
-        Matrix* temp_concat = matrix_memory_allocator.Allocate("temp_softmax");
-        gpu_sim.Concat(softmax_QK, softmax_row, temp_concat, 0, kInSharedMemory);
+        Matrix* temp = matrix_memory_allocator.Allocate("temp_S");
+        gpu_sim.Concat(softmax_QK, norm_row, temp, 0, kInSharedMemory);
         gpu_sim.ReleaseMatrix(softmax_QK);
-        gpu_sim.ReleaseMatrix(softmax_row);
-        softmax_QK = temp_concat;
+        gpu_sim.ReleaseMatrix(norm_row);
+        softmax_QK = temp;
       }
     }
     gpu_sim.ReleaseMatrix(exp_QK);
 
-    // Concatenate all values[0..i] into V_all in HBM
+    // Build V_all by concatenating values in SRAM
     Matrix* V_all = nullptr;
     for (size_t j = 0; j <= i; ++j) {
+      gpu_sim.MoveMatrixToSharedMem(values[j]);
       if (j == 0) {
         V_all = matrix_memory_allocator.Allocate("V_all");
-        gpu_sim.Copy(values[j], V_all, kInGpuHbm);
+        gpu_sim.Copy(values[j], V_all, kInSharedMemory);
       } else {
-        Matrix* temp_concat = matrix_memory_allocator.Allocate("temp_V");
-        gpu_sim.Concat(V_all, values[j], temp_concat, 0, kInGpuHbm);
+        Matrix* temp = matrix_memory_allocator.Allocate("temp_V");
+        gpu_sim.Concat(V_all, values[j], temp, 0, kInSharedMemory);
         gpu_sim.ReleaseMatrix(V_all);
-        V_all = temp_concat;
+        V_all = temp;
       }
+      gpu_sim.MoveMatrixToGpuHbm(values[j]);
     }
 
-    // Move V_all to SRAM
-    gpu_sim.MoveMatrixToSharedMem(V_all);
-
-    // Compute final result: softmax_QK @ V_all = [i+1, i+1] @ [i+1, d] = [i+1, d]
+    // Compute attention output
     Matrix* result = matrix_memory_allocator.Allocate("result");
     gpu_sim.MatMul(softmax_QK, V_all, result);
     gpu_sim.ReleaseMatrix(softmax_QK);
     gpu_sim.ReleaseMatrix(V_all);
 
-    // Move query back to HBM
+    // Move everything back to HBM
     gpu_sim.MoveMatrixToGpuHbm(current_query);
-
-    // Move result to HBM
     gpu_sim.MoveMatrixToGpuHbm(result);
 
     gpu_sim.Run(false, &matrix_memory_allocator);
